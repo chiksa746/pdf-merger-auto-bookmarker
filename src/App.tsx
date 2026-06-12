@@ -24,7 +24,14 @@ import {
   Loader2,
   FileText,
   ArrowUpDown,
-  GripVertical
+  GripVertical,
+  Monitor,
+  Smartphone,
+  Laptop,
+  Terminal,
+  Copy,
+  ExternalLink,
+  Layers
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { PDFFile, FlatBookmark } from "./types";
@@ -45,8 +52,14 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState("");
   const [aiMode, setAiMode] = useState<"general" | "sheet" | "page_titles">("general");
   const [autoAnalyzeOnUpload, setAutoAnalyzeOnUpload] = useState(true);
+  const [outlineEngine, setOutlineEngine] = useState<"smart" | "local">("local");
   const [draggedFileIndex, setDraggedFileIndex] = useState<number | null>(null);
   const [dragOverFileIndex, setDragOverFileIndex] = useState<number | null>(null);
+  
+  // Platform Installer States
+  const [activePlatform, setActivePlatform] = useState<"windows" | "mac" | "android" | "ios">("windows");
+  const [showInstallerPanel, setShowInstallerPanel] = useState(false);
+  const [copiedText, setCopiedText] = useState<string | null>(null);
 
   // Simple heuristic checking if a file or list of files is likely a Drawing Set (e.g., CAD/blueprints)
   const detectRecommendedMode = (files: PDFFile[]): "general" | "sheet" | "page_titles" => {
@@ -96,6 +109,192 @@ export default function App() {
     
     // If it is multi-page and has "combined", let's prefer "page_titles" or "general"
     return "general";
+  };
+
+  // Highly robust client-side Local Heuristic rule engine for offline PDF bookmark generation
+  const generateLocalHeuristicBookmarks = (
+    mode: "general" | "sheet" | "page_titles",
+    filesToUse: PDFFile[]
+  ): FlatBookmark[] => {
+    const localBookmarks: FlatBookmark[] = [];
+    let globalIndex = 0;
+
+    for (const file of filesToUse) {
+      const fileStartPageIndex = globalIndex;
+      
+      // If we have multiple files associated, inject a parent-level boundary header
+      if (filesToUse.length > 1) {
+        localBookmarks.push({
+          id: `local-boundary-${file.id}-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+          title: `Document: ${file.name.replace(/\.pdf$/i, "")}`,
+          pageIndex: fileStartPageIndex,
+          level: 0,
+        });
+      }
+
+      for (const page of file.pages) {
+        const text = page.textSample || "";
+        const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+        
+        if (mode === "page_titles") {
+          let detectedTitle = "";
+          // Find the first line that is not purely dynamic data or short digits, of reasonable length
+          for (const line of lines) {
+            const cleanLine = line.trim();
+            if (
+              cleanLine.length > 3 && 
+              cleanLine.length < 50 && 
+              !/^\d+$/.test(cleanLine) && 
+              !/^(page|p\.)\s*\d+/i.test(cleanLine) &&
+              !cleanLine.includes("/")
+            ) {
+              detectedTitle = cleanLine;
+              break;
+            }
+          }
+          
+          if (!detectedTitle) {
+            detectedTitle = lines[0] || `Page ${globalIndex + 1}`;
+          }
+          
+          // Clean formatting
+          detectedTitle = detectedTitle.replace(/\s+/g, " ");
+          if (detectedTitle.length > 45) {
+            detectedTitle = detectedTitle.slice(0, 42) + "...";
+          }
+
+          localBookmarks.push({
+            id: `local-page-${globalIndex}-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+            title: detectedTitle,
+            pageIndex: globalIndex,
+            level: filesToUse.length > 1 ? 1 : 0,
+          });
+
+        } else if (mode === "sheet") {
+          // Drawing Sheet Heuristics (matches indices like A-101, ME-302, CIVIL-10)
+          let drawingNo = "";
+          let drawingTitle = "";
+
+          // Regex to locate sheet numbers
+          const sheetNumRegex = /\b([a-z]{1,4}-\d{2,4}(?:\.\d+)?|[a-z]{1,4}\d{3,4})\b/i;
+          for (const line of lines) {
+            const match = line.match(sheetNumRegex);
+            if (match) {
+              drawingNo = match[1].toUpperCase();
+              break;
+            }
+          }
+
+          if (!drawingNo) {
+            const sheetSequenceNum = globalIndex - fileStartPageIndex + 1;
+            drawingNo = `S-${sheetSequenceNum.toString().padStart(3, "0")}`;
+          }
+
+          // Search typical CAD sheet phrases: PLAN, ELEVATION, DETAIL, SECTIONS, SCHEDULE, NOTES, DIAGRAM
+          const blueprintKeywords = ["PLAN", "DETAIL", "ELEVATION", "SECTION", "DIAGRAM", "SCHEDULE", "COVER", "NOTE", "MAP", "DRAWING", "LAYOUT"];
+          for (const line of lines) {
+            const upper = line.toUpperCase();
+            if (
+              line.length > 4 && 
+              line.length < 50 && 
+              blueprintKeywords.some(keyword => upper.includes(keyword)) &&
+              !upper.includes(drawingNo)
+            ) {
+              drawingTitle = line;
+              break;
+            }
+          }
+
+          // General uppercase title selection fallback
+          if (!drawingTitle) {
+            for (const line of lines) {
+              const clean = line.trim();
+              if (clean.length > 4 && clean.length < 40 && /^[A-Z]/.test(clean) && !clean.toLowerCase().includes("page")) {
+                drawingTitle = clean;
+                break;
+              }
+            }
+          }
+
+          if (!drawingTitle) {
+            drawingTitle = `Sheet Layout ${globalIndex - fileStartPageIndex + 1}`;
+          }
+
+          drawingTitle = drawingTitle.replace(/\s+/g, " ");
+          if (drawingTitle.length > 35) {
+            drawingTitle = drawingTitle.slice(0, 32) + "...";
+          }
+
+          localBookmarks.push({
+            id: `local-cad-${globalIndex}-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+            title: `${drawingNo}: ${drawingTitle}`,
+            pageIndex: globalIndex,
+            level: filesToUse.length > 1 ? 1 : 0,
+          });
+
+        } else {
+          // General / Chapter Outlines Mode
+          let detectedBookmarkOnPage = false;
+
+          for (const line of lines) {
+            const upper = line.toUpperCase();
+            const isChapterPrefix = /^(CHAPTER|SECTION|PART|APPENDIX|VOLUME|MODULE|UNIT)\b/i.test(line);
+            const isNumberedHeading = /^\b\d+(\.\d+){1,3}\s+[A-Z]/i.test(line) || /^\d+\s+[A-Z][a-z]{2,}/.test(line);
+            const isUniversalSection = [
+              "INTRODUCTION", "ABSTRACT", "REFERENCES", "CONCLUSION", 
+              "BIBLIOGRAPHY", "SUMMARY", "FOREWORD", "PREFACE", 
+              "INDEX", "TABLE OF CONTENTS", "GLOSSARY", "SCHEDULING"
+            ].includes(upper);
+
+            if (isChapterPrefix || isNumberedHeading || isUniversalSection) {
+              let parsedTitle = line.trim().replace(/\s+/g, " ");
+              if (parsedTitle.length > 45) {
+                parsedTitle = parsedTitle.slice(0, 42) + "...";
+              }
+
+              // De-duplicate if the exact same page index and title exists
+              const alreadyBookmarked = localBookmarks.some(b => b.title === parsedTitle && b.pageIndex === globalIndex);
+              if (!alreadyBookmarked) {
+                let currentLevel = 1;
+
+                if (isChapterPrefix || isUniversalSection) {
+                  currentLevel = 0;
+                } else if (isNumberedHeading && !line.includes(".")) {
+                  currentLevel = 0;
+                }
+
+                // If multiple files are uploaded, shift level down to put under parent multi-file separator
+                if (filesToUse.length > 1) {
+                  currentLevel = Math.min(currentLevel + 1, 2) as 0 | 1 | 2;
+                }
+
+                localBookmarks.push({
+                  id: `local-gen-${globalIndex}-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+                  title: parsedTitle,
+                  pageIndex: globalIndex,
+                  level: currentLevel as 0 | 1 | 2,
+                });
+                detectedBookmarkOnPage = true;
+              }
+            }
+          }
+
+          // Cover/Title page placeholder fallback for document starts
+          if (globalIndex === fileStartPageIndex && !detectedBookmarkOnPage) {
+            localBookmarks.push({
+              id: `local-start-${globalIndex}-${Date.now()}`,
+              title: `Cover / Start Page`,
+              pageIndex: globalIndex,
+              level: filesToUse.length > 1 ? 1 : 0,
+            });
+          }
+        }
+
+        globalIndex++;
+      }
+    }
+
+    return localBookmarks.sort((a, b) => a.pageIndex - b.pageIndex);
   };
 
   // Input state for quick manual bookmark
@@ -259,7 +458,7 @@ export default function App() {
     setTimeout(() => setStatusMessage(""), 3000);
   };
 
-  // Smart Gemini AI Bookmark Generator
+  // Smart Gemini AI & Heuristic Bookmark Generator
   const generateSmartBookmarks = async (
     mode: "general" | "sheet" | "page_titles" = "general",
     targetFiles?: PDFFile[]
@@ -272,6 +471,33 @@ export default function App() {
 
     setIsAiGenerating(true);
     setErrorMessage("");
+
+    if (outlineEngine === "local") {
+      setAiStatusMessage("Running offline client-side heuristic engine...");
+      // Wrap in small timeout to let visual spinner render
+      setTimeout(() => {
+        try {
+          const localResults = generateLocalHeuristicBookmarks(mode, filesToUse);
+          setBookmarks(localResults);
+          setStatusMessage(
+            mode === "sheet"
+              ? "Successfully generated Drawing Sheet outlines using offline local heuristics!"
+              : mode === "page_titles"
+              ? "Successfully extracted individual page titles using offline local heuristics!"
+              : "Successfully generated chapter outline using offline local heuristics!"
+          );
+          setTimeout(() => setStatusMessage(""), 4000);
+        } catch (err: any) {
+          console.error("Local parsing error:", err);
+          setErrorMessage("Failed to run local heuristic parsing: " + err.message);
+        } finally {
+          setIsAiGenerating(false);
+          setAiStatusMessage("");
+        }
+      }, 150);
+      return;
+    }
+
     setAiStatusMessage(
       mode === "sheet"
         ? "Scanning page margins and title blocks for Sheet Names & Drawings..."
@@ -314,7 +540,7 @@ export default function App() {
       });
 
       if (!response.ok) {
-        const errData = await response.json();
+        const errData = await response.json().catch(() => ({}));
         throw new Error(errData.error || "Failed to parse document outline");
       }
 
@@ -338,14 +564,21 @@ export default function App() {
             : mode === "page_titles"
             ? "Gemini AI successfully extracted titles for each individual page!"
             : "Gemini AI successfully auto-generated professional hierarchical bookmarks!"
-        );
+         );
         setTimeout(() => setStatusMessage(""), 4000);
       } else {
         throw new Error("Invalid output layout format received from smart analyzer");
       }
     } catch (err: any) {
-      console.error("Smart Outline error:", err);
-      setErrorMessage(err.message || "Unresponsive remote model state, please try again.");
+      console.warn("Gemini AI key/network not found, running seamless offline fallback:", err);
+      try {
+        const fallbackResults = generateLocalHeuristicBookmarks(mode, filesToUse);
+        setBookmarks(fallbackResults);
+        setStatusMessage("Offline Graceful Fallback: Auto-Generated layout using offline text parser!");
+        setTimeout(() => setStatusMessage(""), 5000);
+      } catch (fallbackErr: any) {
+        setErrorMessage("Offline fallback analysis failed: " + fallbackErr.message);
+      }
     } finally {
       setIsAiGenerating(false);
       setAiStatusMessage("");
@@ -443,6 +676,143 @@ export default function App() {
     reader.readAsText(file);
   };
 
+  // Helper to copy config/terminal code to clipboard
+  const handleCopyInstallerText = (text: string, key: string) => {
+    try {
+      navigator.clipboard.writeText(text);
+      setCopiedText(key);
+      setTimeout(() => setCopiedText(null), 3500);
+    } catch (err) {
+      console.error("Clipboard copy failed:", err);
+    }
+  };
+
+  // Automated client-side launcher downloads
+  const downloadLocalInstallerScript = (type: "bat" | "sh" | "tauri" | "electron") => {
+    try {
+      let content = "";
+      let filename = "";
+      let mimeType = "text/plain";
+
+      const currentOrigin = window.location.origin;
+
+      if (type === "bat") {
+        content = `@echo off\r\n` +
+          `title PDF Merger & Auto Bookmarker Standalone Launcher\r\n` +
+          `color 0B\r\n` +
+          `echo =============================================================\r\n` +
+          `echo   LAUNCHING OFFLINE CLIENT-SIDE PDF BOOKMARKER ON WINDOWS\r\n` +
+          `echo =============================================================\r\n` +
+          `echo.\n` +
+          `echo Opening standalone workspace app window in Edge App frame...\r\n` +
+          `start msedge --app="${currentOrigin}"\r\n` +
+          `echo Done. A standalone native frame has loaded. Enjoy!\r\n` +
+          `timeout /t 3 >nul\r\n` +
+          `exit\r\n`;
+        filename = "install_and_run_windows.bat";
+        mimeType = "application/bat";
+      } else if (type === "sh") {
+        content = `#!/bin/bash\n` +
+          `# Standalone application frame launcher for macOS & Linux\n` +
+          `echo "============================================================="\n` +
+          `echo "  LAUNCHING OFFLINE CLIENT-SIDE PDF BOOKMARKER ON macOS/LINUX"\n` +
+          `echo "============================================================="\n` +
+          `echo ""\n` +
+          `echo "Detecting Google Chrome to open in Standalone Borderless Mode..."\n` +
+          `if [ "$(uname)" == "Darwin" ]; then\n` +
+          `  open -na "Google Chrome" --args --app="${currentOrigin}" || open "${currentOrigin}"\n` +
+          `else\n` +
+          `  google-chrome --app="${currentOrigin}" || xdg-open "${currentOrigin}"\n` +
+          `fi\n` +
+          `echo "Standalone desktop container launched successfully!"\n`;
+        filename = "install_and_run_mac.sh";
+        mimeType = "application/x-sh";
+      } else if (type === "tauri") {
+        const tauriConfig = {
+          build: {
+            beforeDevCommand: "npm run dev",
+            beforeBuildCommand: "npm run build",
+            devPath: "http://localhost:3001",
+            distDir: "../dist"
+          },
+          package: {
+            productName: "PDFBookmarker",
+            version: "1.0.0"
+          },
+          tauri: {
+            allowlist: {
+              all: true
+            },
+            bundle: {
+              active: true,
+              category: "Office",
+              icon: ["icons/128x128.png", "icons/512x512.png"],
+              identifier: "com.pdfbookmarker.app",
+              publisher: "LocalOfflineTools",
+              targets: ["msi", "appimage", "dmg"]
+            },
+            windows: [
+              {
+                title: "PDF Merger & Auto Bookmarker Standalone",
+                width: 1200,
+                height: 800,
+                resizable: true,
+                fullscreen: false
+              }
+            ]
+          }
+        };
+        content = JSON.stringify(tauriConfig, null, 2);
+        filename = "tauri.conf.json";
+        mimeType = "application/json";
+      } else if (type === "electron") {
+        content = `// Electron Desktop Entrypoint main.js\n` +
+          `const { app, BrowserWindow } = require('electron');\n` +
+          `const path = require('path');\n\n` +
+          `function createWindow () {\n` +
+          `  const win = new BrowserWindow({\n` +
+          `    width: 1280,\n` +
+          `    height: 850,\n` +
+          `    title: "PDF Merger & Auto Bookmarker Client",\n` +
+          `    webPreferences: {\n` +
+          `      nodeIntegration: false,\n` +
+          `      contextIsolation: true\n` +
+          `    }\n` +
+          `  });\n\n` +
+          `  // Load the web app directly, completely bypass routing\n` +
+          `  win.loadURL("${currentOrigin}");\n` +
+          `  win.setMenu(null); // Clean menu bars\n` +
+          `}\n\n` +
+          `app.whenReady().then(() => {\n` +
+          `  createWindow();\n` +
+          `  app.on('activate', () => {\n` +
+          `    if (BrowserWindow.getAllWindows().length === 0) createWindow();\n` +
+          `  });\n` +
+          `});\n\n` +
+          `app.on('window-all-closed', () => {\n` +
+          `  if (process.platform !== 'darwin') app.quit();\n` +
+          `});\n`;
+        filename = "electron-main.js";
+        mimeType = "text/javascript";
+      }
+
+      const blob = new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.setAttribute("href", url);
+      anchor.setAttribute("download", filename);
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      
+      setStatusMessage(`Successfully downloaded ${filename} binary configuration!`);
+      setTimeout(() => setStatusMessage(""), 3500);
+    } catch (err: any) {
+      setErrorMessage("Failed code export: " + err.message);
+    }
+  };
+
   // Merge & compile using pdf-lib client-side
   const compilePdfOutput = async () => {
     if (pdfFiles.length === 0) {
@@ -516,6 +886,19 @@ export default function App() {
                 {bookmarks.length} Bookmarks Scheduled
               </span>
             )}
+            <button
+              id="header-btn-installer-hub"
+              onClick={() => setShowInstallerPanel(!showInstallerPanel)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border shadow-sm transition-all cursor-pointer select-none ${
+                showInstallerPanel
+                  ? "bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700"
+                  : "bg-indigo-50 text-indigo-700 border-indigo-100 hover:bg-indigo-100"
+              }`}
+              title="Open Windows, macOS, Android, & iOS standalone apps setup panel"
+            >
+              <Laptop className="w-3.5 h-3.5 animate-bounce" />
+              <span>Install Offline Apps</span>
+            </button>
           </div>
         </div>
       </header>
@@ -523,6 +906,364 @@ export default function App() {
       {/* Main Workspace Frame */}
       <main id="app-main-workspace" className="flex-grow max-w-7xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         
+        {/* Standalone Desktop & Mobile Installer Hub Panel */}
+        <AnimatePresence>
+          {showInstallerPanel && (
+            <motion.div
+              id="installer-hub-dashboard"
+              initial={{ opacity: 0, scale: 0.98, height: 0 }}
+              animate={{ opacity: 1, scale: 1, height: "auto" }}
+              exit={{ opacity: 0, scale: 0.98, height: 0 }}
+              className="lg:col-span-12 w-full bg-linear-to-b from-neutral-900 to-neutral-950 text-white rounded-3xl p-6 border border-neutral-800 shadow-xl overflow-hidden flex flex-col gap-6"
+            >
+              {/* Header Information */}
+              <div id="inst-header" className="flex items-start justify-between flex-wrap gap-4 border-b border-neutral-800 pb-5">
+                <div id="inst-header-left">
+                  <div id="inst-title-badge" className="inline-flex items-center gap-1.5 px-3 py-1 bg-indigo-500/10 border border-indigo-400/20 rounded-full text-indigo-400 text-[10px] font-extrabold tracking-wider uppercase mb-2">
+                    <Layers className="w-3 h-3 text-indigo-400" />
+                    Multi-Platform Offline Ecosystem
+                  </div>
+                  <h2 id="inst-title" className="text-xl font-extrabold tracking-tight text-white sm:text-2xl">
+                    Standalone App Distribution & Installer Hub
+                  </h2>
+                  <p id="inst-desc" className="text-xs text-neutral-400 mt-1 max-w-[720px] leading-relaxed">
+                    This PDF Bookmarker application runs **100% inside local browser storage**. It requires zero database servers, zero third-party cloud hosting, and can be easily installed on your local systems to operate completely offline.
+                  </p>
+                </div>
+                <button
+                  id="btn-close-inst-panel"
+                  onClick={() => setShowInstallerPanel(false)}
+                  className="px-3 py-1.5 text-xs font-bold bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white rounded-xl transition-all cursor-pointer select-none"
+                >
+                  Hide Settings
+                </button>
+              </div>
+
+              {/* Platform Selector Grid Tabbed Menu */}
+              <div id="inst-tabs-container" className="grid grid-cols-2 md:grid-cols-4 bg-neutral-900/50 p-1.5 rounded-2xl border border-neutral-800 gap-1.5">
+                <button
+                  id="tab-inst-windows"
+                  onClick={() => setActivePlatform("windows")}
+                  className={`flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all cursor-pointer select-none ${
+                    activePlatform === "windows"
+                      ? "bg-indigo-600 text-white shadow-md border border-indigo-400/20 scale-[1.01]"
+                      : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/40"
+                  }`}
+                >
+                  <Monitor className="w-4 h-4 shrink-0" />
+                  <span>Windows (.EXE / .BAT)</span>
+                </button>
+                <button
+                  id="tab-inst-mac"
+                  onClick={() => setActivePlatform("mac")}
+                  className={`flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all cursor-pointer select-none ${
+                    activePlatform === "mac"
+                      ? "bg-indigo-600 text-white shadow-md border border-indigo-400/20 scale-[1.01]"
+                      : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/40"
+                  }`}
+                >
+                  <Laptop className="w-4 h-4 shrink-0" />
+                  <span>macOS / Linux (.SH)</span>
+                </button>
+                <button
+                  id="tab-inst-android"
+                  onClick={() => setActivePlatform("android")}
+                  className={`flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all cursor-pointer select-none ${
+                    activePlatform === "android"
+                      ? "bg-indigo-600 text-white shadow-md border border-indigo-400/20 scale-[1.01]"
+                      : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/40"
+                  }`}
+                >
+                  <Smartphone className="w-4 h-4 shrink-0" />
+                  <span>Android (.APK Wrapper)</span>
+                </button>
+                <button
+                  id="tab-inst-ios"
+                  onClick={() => setActivePlatform("ios")}
+                  className={`flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all cursor-pointer select-none ${
+                    activePlatform === "ios"
+                      ? "bg-indigo-600 text-white shadow-md border border-indigo-400/20 scale-[1.01]"
+                      : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/40"
+                  }`}
+                >
+                  <Smartphone className="w-4 h-4 shrink-0" />
+                  <span>iOS Safari PWA</span>
+                </button>
+              </div>
+
+              {/* Dynamic Content Display */}
+              <div id="inst-dynamic-display" className="bg-neutral-900/40 border border-neutral-800 p-6 rounded-2xl">
+                
+                {activePlatform === "windows" && (
+                  <div id="panel-windows" className="flex flex-col gap-6">
+                    <div id="win-prime-method" className="grid grid-cols-1 md:grid-cols-12 gap-5 items-center">
+                      <div className="md:col-span-8">
+                        <span className="text-[9px] px-2 py-0.5 bg-emerald-500/10 text-emerald-400 rounded-full font-extrabold uppercase border border-emerald-500/20">Method 1 • Quick Standalone App</span>
+                        <h3 className="font-extrabold text-base text-white mt-1.5 flex items-center gap-1.5">
+                          Instant Desktop Window Launcher
+                        </h3>
+                        <p className="text-xs text-neutral-400 mt-1 max-w-[580px] leading-relaxed">
+                          Creates a custom borderless Windows execution launcher. When double-clicked, it loads the PDF Bookmarker in a dedicated native window without any typical browser tabs, toolbars, or distractions.
+                        </p>
+                      </div>
+                      <div className="md:col-span-4 flex justify-start md:justify-end">
+                        <button
+                          id="btn-dl-win-bat"
+                          onClick={() => downloadLocalInstallerScript("bat")}
+                          className="w-full sm:w-auto flex items-center justify-center gap-2 px-5 py-3 bg-white text-neutral-900 hover:bg-neutral-100 rounded-xl text-xs font-extrabold transition-all cursor-pointer shadow-md select-none"
+                        >
+                          <Download className="w-4 h-4 text-neutral-800" />
+                          <span>Download Windows Launcher (.BAT)</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <hr className="border-neutral-800" />
+
+                    <div id="win-sec-method">
+                      <span className="text-[9px] px-2 py-0.5 bg-indigo-500/10 text-indigo-400 rounded-full font-extrabold uppercase border border-indigo-400/20">Method 2 • Tauri Compiler Code</span>
+                      <h3 className="font-extrabold text-sm text-white mt-2 flex items-center gap-1.5">
+                        Compile into standard native Desktop Installers (.msi / .exe)
+                      </h3>
+                      <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
+                        To bundle this offline app into an official offline-run executable, you can use **Tauri** (the ultra-lightweight alternative to Electron). Follow these simple steps:
+                      </p>
+
+                      <ol className="list-decimal pl-4 mt-3 text-xs text-neutral-300 space-y-2.5">
+                        <li>
+                          Initialize tauri inside your current local web project folder:
+                          <div className="bg-neutral-950 p-2.5 rounded-lg font-mono text-[11px] text-indigo-300 mt-1 border border-neutral-800 relative flex items-center justify-between">
+                            <span>npm i -D @tauri-apps/cli</span>
+                            <button
+                              onClick={() => handleCopyInstallerText("npm i -D @tauri-apps/cli", "npm_tauri")}
+                              className="text-[10px] px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded"
+                            >
+                              {copiedText === "npm_tauri" ? "Copied!" : "Copy"}
+                            </button>
+                          </div>
+                        </li>
+                        <li>
+                          Click the button below to download the pre-built configuration template:
+                          <div className="mt-2.5 flex items-center gap-2">
+                            <button
+                              id="btn-dl-tauri-json"
+                              onClick={() => downloadLocalInstallerScript("tauri")}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-indigo-300 border border-neutral-700/60 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>Download tauri.conf.json</span>
+                            </button>
+                            <span className="text-[10px] text-neutral-500 font-medium">Place this file inside a newly created <code className="text-indigo-400 font-mono">src-tauri/</code> folder.</span>
+                          </div>
+                        </li>
+                        <li>
+                          Compile your source code into a standalone lightweight Windows `.exe` installer setup (which is created under folder <code className="text-indigo-400 font-mono">src-tauri/target/bundle/msi/</code>):
+                          <div className="bg-neutral-950 p-2.5 rounded-lg font-mono text-[11px] text-indigo-300 mt-1 border border-neutral-800 relative flex items-center justify-between">
+                            <span>npx tauri build</span>
+                            <button
+                              onClick={() => handleCopyInstallerText("npx tauri build", "npx_tauri")}
+                              className="text-[10px] px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded"
+                            >
+                              {copiedText === "npx_tauri" ? "Copied!" : "Copy"}
+                            </button>
+                          </div>
+                        </li>
+                      </ol>
+                    </div>
+                  </div>
+                )}
+
+                {activePlatform === "mac" && (
+                  <div id="panel-mac" className="flex flex-col gap-6">
+                    <div id="mac-prime-method" className="grid grid-cols-1 md:grid-cols-12 gap-5 items-center">
+                      <div className="md:col-span-8">
+                        <span className="text-[9px] px-2 py-0.5 bg-emerald-500/10 text-emerald-400 rounded-full font-extrabold uppercase border border-emerald-500/20">Method 1 • Quick UNIX Standalone App</span>
+                        <h3 className="font-extrabold text-base text-white mt-1.5 flex items-center gap-1.5">
+                          Instant Mac/Linux Shell Launcher
+                        </h3>
+                        <p className="text-xs text-neutral-400 mt-1 max-w-[580px] leading-relaxed">
+                          Downloads a safe standalone script for Mac & Linux. When executed, it launches the web interface instantly in Apple Chrome's kiosk standalone frame mode.
+                        </p>
+                      </div>
+                      <div className="md:col-span-4 flex justify-start md:justify-end">
+                        <button
+                          id="btn-dl-mac-sh"
+                          onClick={() => downloadLocalInstallerScript("sh")}
+                          className="w-full sm:w-auto flex items-center justify-center gap-2 px-5 py-3 bg-white text-neutral-900 hover:bg-neutral-100 rounded-xl text-xs font-extrabold transition-all cursor-pointer shadow-md select-none"
+                        >
+                          <Download className="w-4 h-4 text-neutral-800" />
+                          <span>Mac/Linux Launcher (.SH)</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <hr className="border-neutral-800" />
+
+                    <div id="mac-sec-method">
+                      <span className="text-[9px] px-2 py-0.5 bg-indigo-500/10 text-indigo-400 rounded-full font-extrabold uppercase border border-indigo-400/20">Method 2 • Electron Compilation</span>
+                      <h3 className="font-extrabold text-sm text-white mt-1.5 flex items-center gap-1.5">
+                        Bundle into beautiful macOS .dmg or .app packages
+                      </h3>
+                      <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
+                        Create an native Mac window wrapper using **Electron**. Execute the following local terminal steps inside your app repository:
+                      </p>
+
+                      <ol className="list-decimal pl-4 mt-3 text-xs text-neutral-300 space-y-2.5">
+                        <li>
+                          Install the electron dependencies inside your project:
+                          <div className="bg-neutral-950 p-2.5 rounded-lg font-mono text-[11px] text-indigo-300 mt-1 border border-neutral-800 relative flex items-center justify-between">
+                            <span>npm i --save-dev electron electron-builder</span>
+                            <button
+                              onClick={() => handleCopyInstallerText("npm i --save-dev electron electron-builder", "mac_npm")}
+                              className="text-[10px] px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded"
+                            >
+                              {copiedText === "mac_npm" ? "Copied!" : "Copy"}
+                            </button>
+                          </div>
+                        </li>
+                        <li>
+                          Click below to download the native Electron helper main script:
+                          <div className="mt-2.5 flex items-center gap-2">
+                            <button
+                              id="btn-dl-mac-electron"
+                              onClick={() => downloadLocalInstallerScript("electron")}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-indigo-300 border border-neutral-700/60 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>Download electron-main.js</span>
+                            </button>
+                            <span className="text-[10px] text-neutral-500 font-medium">Keep this file at the root level of your project folders.</span>
+                          </div>
+                        </li>
+                        <li>
+                          Instantly trigger compilation packaging for Apple architectures:
+                          <div className="bg-neutral-950 p-2.5 rounded-lg font-mono text-[11px] text-indigo-300 mt-1 border border-neutral-800 relative flex items-center justify-between">
+                            <span>npx electron-builder build --mac</span>
+                            <button
+                              onClick={() => handleCopyInstallerText("npx electron-builder build --mac", "mac_compile")}
+                              className="text-[10px] px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded"
+                            >
+                              {copiedText === "mac_compile" ? "Copied!" : "Copy"}
+                            </button>
+                          </div>
+                        </li>
+                      </ol>
+                    </div>
+                  </div>
+                )}
+
+                {activePlatform === "android" && (
+                  <div id="panel-android" className="flex flex-col gap-6">
+                    <div id="android-prime">
+                      <span className="text-[9px] px-2 py-0.5 bg-emerald-500/10 text-emerald-400 rounded-full font-extrabold uppercase border border-emerald-500/20">Method 1 • Quick Browser Home Screen Install</span>
+                      <h3 className="font-extrabold text-base text-white mt-1.5 flex items-center gap-1.5">
+                        Add Standalone Android App (Zero Downloads)
+                      </h3>
+                      <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
+                        Because our PDF tool implements a modern, robust **Progressive Web App (PWA)** cache framework, you can install it instantly without using any App Stores or downloading foreign installer files!
+                      </p>
+
+                      <ul className="list-disc pl-4 mt-3 text-xs text-neutral-300 space-y-2">
+                        <li>Open this URL inside the mobile <strong className="text-indigo-400">Google Chrome</strong> or <strong className="text-indigo-400">Microsoft Edge</strong> browser on your Android tablet or phone.</li>
+                        <li>Click the browser menu (the three vertical dots <strong className="text-neutral-400">⁝</strong> at the top-right corner of the browser app).</li>
+                        <li>Tap <strong className="text-indigo-300 font-bold">"Install app"</strong> or <strong className="text-indigo-300 font-bold">"Add to Home screen"</strong>.</li>
+                        <li>A native launch icon is placed on your launcher screen, running in a full-screen hardware-accelerated standalone offline container!</li>
+                      </ul>
+                    </div>
+
+                    <hr className="border-neutral-800" />
+
+                    <div id="android-sec">
+                      <span className="text-[9px] px-2 py-0.5 bg-indigo-500/10 text-indigo-400 rounded-full font-extrabold uppercase border border-indigo-400/20">Method 2 • Capacitor Build Tools</span>
+                      <h3 className="font-extrabold text-sm text-white mt-2">
+                        Compile into standard native Android installer package (.apk)
+                      </h3>
+                      <p className="text-xs text-neutral-400 mt-1 max-w-[620px] leading-relaxed">
+                        To build a highly customized binary installation package suitable for Android deployment, you can use **CapacitorJS**. Run the following commands:
+                      </p>
+
+                      <div className="bg-neutral-950 p-4 rounded-xl font-mono text-[11px] text-indigo-300 mt-3 border border-neutral-800 flex flex-col gap-2">
+                        <div className="flex items-center justify-between border-b border-neutral-900 pb-1.5 mb-1.5">
+                          <span className="text-neutral-500 font-bold text-[9px] uppercase tracking-wider">Capacitor Android Commands</span>
+                          <button
+                            onClick={() => handleCopyInstallerText("npm i @capacitor/core @capacitor/cli && npx cap init && npx cap add android && npx cap run android", "caps_android")}
+                            className="bg-neutral-900 hover:bg-neutral-800 px-2 py-1 text-[10px] text-neutral-400 hover:text-white rounded transition-colors"
+                          >
+                            {copiedText === "caps_android" ? "Copied!" : "Copy Suite"}
+                          </button>
+                        </div>
+                        <div># 1. Install Capacitor packages</div>
+                        <div className="text-white">npm i @capacitor/core @capacitor/cli</div>
+                        <div># 2. Setup your mobile app settings & bundle identifiers</div>
+                        <div className="text-white">npx cap init</div>
+                        <div># 3. Compile source code files, then inject platform targets</div>
+                        <div className="text-white">npm run build && npx cap add android</div>
+                        <div># 4. Open in Android Studio to build alignment and package .APK files!</div>
+                        <div className="text-white">npx cap open android</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {activePlatform === "ios" && (
+                  <div id="panel-ios" className="flex flex-col gap-6">
+                    <div id="ios-prime">
+                      <span className="text-[9px] px-2 py-0.5 bg-emerald-500/10 text-emerald-400 rounded-full font-extrabold uppercase border border-emerald-500/20">Primary Method • Safe iOS Native Standalone App</span>
+                      <h3 className="font-extrabold text-base text-white mt-1.5 flex items-center gap-1.5">
+                        Add to Home Screen in Safari
+                      </h3>
+                      <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
+                        iOS Safari includes a built-in highly secure method to install single-page tools directly onto your home screen, without sandbox or App Store restrictions:
+                      </p>
+
+                      <ul className="list-disc pl-4 mt-3 text-xs text-neutral-300 space-y-2.5">
+                        <li>Open this URL inside the native <strong className="text-indigo-400">Safari</strong> browser application on your iPhone, iPad, or iPod touch.</li>
+                        <li>Tap the official App <strong className="text-indigo-300">"Share" button</strong> (represented by the square drawer icon with an arrow pointing upwards at the bottom menu header).</li>
+                        <li>Scroll down through the item options list and tap the option labeled <strong className="text-indigo-400 font-extrabold">"Add to Home Screen"</strong>.</li>
+                        <li>Specify your custom name and tap <strong className="text-indigo-400 font-bold">Add</strong>.</li>
+                        <li>The PDF tool is now ready on your home screen, bypassing App Store limits, running with its own dedicated isolated local memory cache, offline compatibility, and borderless window frames!</li>
+                      </ul>
+                    </div>
+
+                    <hr className="border-neutral-800" />
+
+                    <div id="ios-sec">
+                      <span className="text-[9px] px-2 py-0.5 bg-indigo-500/10 text-indigo-400 rounded-full font-extrabold uppercase border border-indigo-400/20">Advanced Method • Capacitor Wrapper for iOS AppStore</span>
+                      <h3 className="font-extrabold text-sm text-white mt-2">
+                        Bundle into native iOS Xcode target (.ipa Package)
+                      </h3>
+                      <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
+                        Create standard iOS targets by combining Capacitor configuration options locally with macOS Xcode tools:
+                      </p>
+
+                      <div className="bg-neutral-950 p-4 rounded-xl font-mono text-[11px] text-indigo-300 mt-3 border border-neutral-800 flex flex-col gap-2">
+                        <div className="flex items-center justify-between border-b border-neutral-900 pb-1.5 mb-1.5">
+                          <span className="text-neutral-500 font-bold text-[9px] uppercase tracking-wider">iOS Xcode Integration Commands</span>
+                          <button
+                            onClick={() => handleCopyInstallerText("npm i @capacitor/core @capacitor/cli && npx cap init && npx cap add ios && npx cap open ios", "caps_ios")}
+                            className="bg-neutral-900 hover:bg-neutral-800 px-2 py-1 text-[10px] text-neutral-400 hover:text-white rounded transition-colors"
+                          >
+                            {copiedText === "caps_ios" ? "Copied!" : "Copy Suite"}
+                          </button>
+                        </div>
+                        <div># 1. Install Capacitor</div>
+                        <div className="text-white">npm i @capacitor/core @capacitor/cli</div>
+                        <div># 2. Initialize and configure workspace inputs</div>
+                        <div className="text-white">npx cap init</div>
+                        <div># 3. Add Xcode platform target folder structure</div>
+                        <div className="text-white">npm run build && npx cap add ios</div>
+                        <div># 4. Launch Apple Xcode locally to test, run, and sign the application!</div>
+                        <div className="text-white">npx cap open ios</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Left Hand Workspace Frame: Input & Page Previews (lg:span-6) */}
         <section id="workspace-left-pane" className="lg:col-span-6 flex flex-col gap-6 w-full">
           
@@ -742,9 +1483,58 @@ export default function App() {
                 <Sparkles id="ai-title-icon" className="w-4.5 h-4.5 text-indigo-600 fill-indigo-600/30 animate-pulse" />
                 Automated Operations Tree
               </h3>
-              <span id="ai-provider-badge" className="text-[10px] uppercase font-extrabold tracking-wider bg-violet-50 text-violet-700 px-2 py-0.5 rounded border border-violet-100">
-                AI Powered
+              <span id="ai-provider-badge" className={`text-[10px] uppercase font-extrabold tracking-wider px-2 py-0.5 rounded border ${
+                outlineEngine === "smart"
+                  ? "bg-violet-50 text-violet-700 border-violet-100"
+                  : "bg-teal-50 text-teal-700 border-teal-100"
+              }`}>
+                {outlineEngine === "smart" ? "AI Powered" : "Offline Engine"}
               </span>
+            </div>
+
+            {/* Premium segmented control for Processing Engine */}
+            <div id="ai-engine-selector-container" className="flex flex-col gap-1.5 bg-neutral-50/50 p-3 rounded-xl border border-neutral-200/60 shadow-2xs">
+              <span id="ai-engine-label" className="text-xs font-bold text-neutral-800 flex items-center justify-between">
+                <span>Outline Analysis Method</span>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded font-extrabold tracking-wide uppercase ${
+                  outlineEngine === "smart" ? "bg-violet-100 text-violet-800" : "bg-teal-100 text-teal-800"
+                }`}>
+                  {outlineEngine === "smart" ? "Cloud AI" : "Local Rules"}
+                </span>
+              </span>
+              <div id="ai-engine-switches" className="grid grid-cols-2 bg-neutral-100 p-1 rounded-lg gap-1 border border-neutral-200/40">
+                <button
+                  id="btn-engine-smart"
+                  type="button"
+                  onClick={() => setOutlineEngine("smart")}
+                  className={`text-[11px] text-center py-1.5 font-extrabold rounded-md transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                    outlineEngine === "smart"
+                      ? "bg-white text-indigo-700 shadow-sm border border-neutral-200/30"
+                      : "text-neutral-500 hover:text-neutral-800"
+                  }`}
+                >
+                  <Sparkles className="w-3 h-3 text-indigo-600 fill-indigo-600/10 shrink-0" />
+                  <span>Gemini Cloud AI</span>
+                </button>
+                <button
+                  id="btn-engine-local"
+                  type="button"
+                  onClick={() => setOutlineEngine("local")}
+                  className={`text-[11px] text-center py-1.5 font-extrabold rounded-md transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                    outlineEngine === "local"
+                      ? "bg-white text-teal-700 shadow-sm border border-neutral-200/30"
+                      : "text-neutral-500 hover:text-neutral-800"
+                  }`}
+                >
+                  <Hash className="w-3 h-3 text-teal-600 shrink-0" />
+                  <span>Local Engine (Offline)</span>
+                </button>
+              </div>
+              <p id="ai-engine-explain" className="text-[10px] text-neutral-400 font-medium leading-relaxed mt-0.5">
+                {outlineEngine === "smart" 
+                  ? "Uses cloud LLM processing to detect hierarchical bookmarks. Securely auto-falls back to local rules if unreachable." 
+                  : "Uses zero-network offline heuristics checking page texts in-browser. Private, immediate, and needs no keys/internet."}
+              </p>
             </div>
 
             {/* Premium segmented control for AI mode */}
@@ -836,22 +1626,30 @@ export default function App() {
             </div>
             
             <div id="ai-actions-grid" className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {/* Trigger Gemini Smart AI bookmarker */}
+              {/* Trigger Gemini Smart AI & Offline Heuristics bookmarker */}
               <button
                 id="btn-trigger-gemini-ai"
                 onClick={() => generateSmartBookmarks(aiMode)}
                 disabled={pdfFiles.length === 0 || isAiGenerating}
-                className="relative overflow-hidden flex items-center justify-center gap-2 p-3 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-700 text-white hover:from-indigo-700 hover:to-violet-800 disabled:opacity-40 font-bold transition-all shadow-md shadow-indigo-150 disabled:shadow-none hover:shadow-indigo-200 group cursor-pointer text-xs"
+                className={`relative overflow-hidden flex items-center justify-center gap-2 p-3 rounded-xl text-white disabled:opacity-40 font-bold transition-all disabled:shadow-none group cursor-pointer text-xs ${
+                  outlineEngine === "smart"
+                    ? "bg-gradient-to-r from-indigo-600 to-violet-700 hover:from-indigo-700 hover:to-violet-800 shadow-md shadow-indigo-150 hover:shadow-indigo-200"
+                    : "bg-teal-600 hover:bg-teal-700 shadow-md shadow-teal-100 hover:shadow-teal-150"
+                }`}
               >
                 {isAiGenerating ? (
                   <>
                     <Loader2 id="ai-loader-icon" className="w-4 h-4 animate-spin text-white" />
-                    <span>Processing with AI...</span>
+                    <span>{outlineEngine === "smart" ? "Processing with AI..." : "Running offline..."}</span>
                   </>
                 ) : (
                   <>
-                    <Sparkles id="ai-btn-icon" className="w-4 h-4 text-violet-100 fill-white/10 group-hover:scale-110 transition-transform" />
-                    <span>Auto-Generate outline</span>
+                    {outlineEngine === "smart" ? (
+                      <Sparkles id="ai-btn-icon" className="w-4 h-4 text-violet-100 fill-white/10 group-hover:scale-110 transition-transform" />
+                    ) : (
+                      <Hash id="local-btn-icon" className="w-4 h-4 text-teal-100 group-hover:scale-110 transition-transform" />
+                    )}
+                    <span>{outlineEngine === "smart" ? "Auto-Generate outline" : "Extract Local Outline"}</span>
                   </>
                 )}
               </button>

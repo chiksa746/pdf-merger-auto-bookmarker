@@ -1,0 +1,21 @@
+{
+  "short_name": "PDF Bookmarker",
+  "name": "PDF Merger & Auto Bookmarker Offline",
+  "icons": [
+    {
+      "src": "https://img.icons8.com/fluency/192/pdf.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "https://img.icons8.com/fluency/512/pdf.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#FBFBFC",
+  "theme_color": "#6366F1",
+  "display": "standalone",
+  "orientation": "any"
+}
