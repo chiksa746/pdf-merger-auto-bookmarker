@@ -1,0 +1,8 @@
+{
+  "name": "PDF Merger & Auto Bookmarker",
+  "description": "An interactive PDF merger that uses Gemini AI to automatically generate smart bookmarks/outlines of pages, with tools for manual customization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
